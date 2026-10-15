@@ -1,5 +1,5 @@
 .persian-translator-btn {
-  position: fixed;
+  position: absolute;
   z-index: 2147483647;
   width: 32px;
   height: 32px;
@@ -35,7 +35,7 @@
 }
 
 .persian-translator-tooltip {
-  position: fixed;
+  position: absolute;
   z-index: 2147483647;
   background: #ffffff;
   border-radius: 12px;
