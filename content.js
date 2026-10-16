@@ -46,7 +46,7 @@
   // (see createTranslateIcon) instead of innerHTML.
   const TRANSLATE_ICON_PATH_D = "M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0014.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z";
   const SVG_NS = "http://www.w3.org/2000/svg";
-  const PT_VERSION = "1.0.5-bidi-fix";
+  const PT_VERSION = "1.0.6-replace-button";
   const MAX_SELECTION_LENGTH = 30000;
 
   let translateBtn = null;
@@ -110,10 +110,24 @@
       if (start === end) return null;
       var text = active.value.slice(start, end).trim();
       if (!text) return null;
-      return { text: text, rect: active.getBoundingClientRect() };
+      return { text: text, rect: active.getBoundingClientRect(), input: active, start: start, end: end };
     } catch (e) {
       return null;
     }
+  }
+
+  // Nearest contenteditable ancestor of a range, or null. Lets us tell whether
+  // the selected text lives in a field we are allowed to write into.
+  function contentEditableOf(range) {
+    try {
+      var node = range.commonAncestorContainer;
+      var elm = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+      while (elm) {
+        if (elm.isContentEditable) return elm;
+        elm = elm.parentElement;
+      }
+    } catch (e) { /* ignore */ }
+    return null;
   }
 
   // { text, rect } for whatever is selected. The DOM branch requires actual
@@ -123,7 +137,17 @@
     var rect = getSelectionRect();
     var text = getSelectedText();
     if (text && rect && rect.width > 0 && rect.height > 0) {
-      return { text: text, rect: rect };
+      var range = null;
+      try {
+        var sel = window.getSelection();
+        if (sel && sel.rangeCount) range = sel.getRangeAt(0);
+      } catch (e) { /* ignore */ }
+      return {
+        text: text,
+        rect: rect,
+        range: range,
+        editable: range ? contentEditableOf(range) : null
+      };
     }
     return getInputSelection();
   }
@@ -131,6 +155,104 @@
   function getAnchorRect() {
     var anchor = getAnchor();
     return anchor ? anchor.rect : null;
+  }
+
+  // Describes HOW to write the translation back into the selection. Only
+  // editable targets are supported (input / textarea / contenteditable); for
+  // plain page text this returns null and the "Replace" button stays hidden,
+  // so a read-only page is never modified.
+  function buildApplyTarget(anchor) {
+    if (!anchor) return null;
+    if (anchor.input) {
+      return { type: "input", element: anchor.input, start: anchor.start, end: anchor.end };
+    }
+    if (anchor.editable && anchor.range) {
+      return { type: "contenteditable", element: anchor.editable, range: anchor.range.cloneRange() };
+    }
+    return null;
+  }
+
+  // Set .value through the prototype's native setter so frameworks that track
+  // the value internally (React, Vue, Angular) notice the change; a plain
+  // `element.value = ...` is swallowed by their value tracker.
+  function setNativeValue(element, value) {
+    try {
+      var proto = element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      var descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+      if (descriptor && typeof descriptor.set === "function") {
+        descriptor.set.call(element, value);
+        return;
+      }
+    } catch (e) { /* fall through to plain assignment */ }
+    try { element.value = value; } catch (e2) { /* ignore */ }
+  }
+
+  function notifyInput(element) {
+    try { element.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) { /* ignore */ }
+  }
+
+  function applyToInput(target, translatedText) {
+    var element = target.element;
+    if (!element || !element.isConnected) return false;
+    var value = String(element.value == null ? "" : element.value);
+    var start = target.start;
+    var end = target.end;
+    if (typeof start !== "number" || start < 0 || start > value.length) start = value.length;
+    if (typeof end !== "number" || end < start || end > value.length) end = start;
+    setNativeValue(element, value.slice(0, start) + translatedText + value.slice(end));
+    try {
+      element.focus();
+      if (typeof element.setSelectionRange === "function") {
+        var caret = start + translatedText.length;
+        element.setSelectionRange(caret, caret);
+      }
+    } catch (e) { /* ignore */ }
+    notifyInput(element);
+    return true;
+  }
+
+  function applyToContentEditable(target, translatedText) {
+    var element = target.element;
+    var range = target.range;
+    if (!element || !element.isConnected || !range) return false;
+    try { element.focus(); } catch (e) { /* ignore */ }
+    // Prefer the browser's own text-insertion pipeline: it fires the right
+    // events, so rich editors (ProseMirror, Quill, ...) stay in sync.
+    var inserted = false;
+    try {
+      var selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+        inserted = !!(document.execCommand && document.execCommand("insertText", false, translatedText));
+      }
+    } catch (e2) { inserted = false; }
+    if (inserted) return true;
+    // Fallback: replace the selected DOM range by hand and de-select it.
+    try {
+      range.deleteContents();
+      var node = document.createTextNode(translatedText);
+      range.insertNode(node);
+      var selection2 = window.getSelection();
+      if (selection2) {
+        selection2.removeAllRanges();
+        var caret = document.createRange();
+        caret.setStartAfter(node);
+        caret.collapse(true);
+        selection2.addRange(caret);
+      }
+      notifyInput(element);
+      return true;
+    } catch (e3) {
+      return false;
+    }
+  }
+
+  function applyTranslation(target, translatedText) {
+    if (!target) return false;
+    if (target.type === "input") return applyToInput(target, translatedText);
+    if (target.type === "contenteditable") return applyToContentEditable(target, translatedText);
+    return false;
   }
 
   function removeTooltip() {
@@ -160,7 +282,7 @@
     return message;
   }
 
-  function createTooltip(text, translatedText, detectedLang, targetLang) {
+  function createTooltip(text, translatedText, detectedLang, targetLang, editableTarget) {
     removeTooltip();
     tooltip = el("div", "persian-translator-tooltip");
 
@@ -179,6 +301,28 @@
 
     var actions = el("div", "pt-actions");
     actions.appendChild(copyBtn);
+
+    // "Replace" is only offered for editable selections (input, textarea,
+    // contenteditable): it writes the translation straight back over the
+    // selected text so it never has to be copied and pasted by hand.
+    if (editableTarget) {
+      var replaceBtn = el("button", "pt-replace");
+      replaceBtn.textContent = "Replace";
+      replaceBtn.title = "Replace the selected text with the translation";
+      replaceBtn.addEventListener("click", function () {
+        var ok = false;
+        try { ok = applyTranslation(editableTarget, translatedText); }
+        catch (e) { ok = false; }
+        if (ok) {
+          replaceBtn.textContent = "Replaced!";
+          setTimeout(removeTooltip, 800);
+        } else {
+          replaceBtn.textContent = "Failed";
+          setTimeout(function () { replaceBtn.textContent = "Replace"; }, 1500);
+        }
+      });
+      actions.appendChild(replaceBtn);
+    }
 
     tooltip.appendChild(header);
 
@@ -377,6 +521,7 @@
       var anchor = getAnchor();
       if (!anchor || !anchor.text) return;
       var text = anchor.text;
+      var editableTarget = buildApplyTarget(anchor);
 
       removeButton();
       createLoadingTooltip();
@@ -437,7 +582,7 @@
             detected = detectTargetLangLocal(text) === "en" ? "fa" : "en";
           }
           done(function () {
-            createTooltip(text, translated, detected, targetLang);
+            createTooltip(text, translated, detected, targetLang, editableTarget);
           });
           return;
         }
