@@ -96,6 +96,8 @@
   word-break: break-word;
   border-bottom: 1px solid #e8eaed;
   padding-bottom: 8px;
+  unicode-bidi: isolate;
+  text-align: start;
 }
 
 .persian-translator-tooltip .pt-translated {
@@ -103,6 +105,31 @@
   color: #202124;
   line-height: 1.6;
   word-break: break-word;
+  unicode-bidi: isolate;
+  text-align: start;
+}
+
+/* Mixed-direction content: the dir attribute + inline styles set in content.js
+   select the correct base direction so an English word inside Persian text (or
+   a Persian word inside English text) does not scramble the sentence order.
+   !important keeps working even if the host page ships conflicting rules. */
+.persian-translator-tooltip .pt-original,
+.persian-translator-tooltip .pt-translated {
+  unicode-bidi: isolate !important;
+  text-align: start;
+  white-space: pre-wrap;
+}
+
+.persian-translator-tooltip .pt-original[dir="rtl"],
+.persian-translator-tooltip .pt-translated[dir="rtl"] {
+  direction: rtl !important;
+  text-align: right !important;
+}
+
+.persian-translator-tooltip .pt-original[dir="ltr"],
+.persian-translator-tooltip .pt-translated[dir="ltr"] {
+  direction: ltr !important;
+  text-align: left !important;
 }
 
 .persian-translator-tooltip .pt-actions {
